@@ -11,9 +11,16 @@ from typing import Dict, Any, Optional
 import logging
 import asyncio
 
+# 加载环境变量
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # 导入LangChain相关模块
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.documents import Document
+from langchain_community.vectorstores import FAISS
 
 # 导入知识库相关模块
 import numpy as np
@@ -22,21 +29,75 @@ from sklearn.metrics.pairwise import cosine_similarity
 import glob
 
 # 配置日志
+# 创建日志目录
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+
+# 配置日志同时输出到控制台和文件
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # 输出到控制台
+        logging.FileHandler(
+            os.path.join(log_dir, "output.log"), mode="w", encoding="utf-8"
+        ),  # 输出到文件
+    ],
 )
 logger = logging.getLogger(__name__)
+
+# 创建独立的测试结果日志文件
+test_result_logger = logging.getLogger("test_results")
+test_result_handler = logging.FileHandler(
+    os.path.join(log_dir, "test_results.log"), mode="w", encoding="utf-8"
+)
+test_result_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(filename)s:%(lineno)d - %(message)s")
+)
+test_result_logger.addHandler(test_result_handler)
+test_result_logger.setLevel(logging.INFO)
+
+
+# TODO： 目前使用TF-IDF向量化和余弦相似度进行知识检索，增加使用embeddingmO型使用更先进的文本嵌入方法来提升知识检索的准确性和效果， 例如：
+# embeddings = OpenAIEmbeddings(
+#     model=model_name,
+#     api_key=ai_config.embedding_api_key,
+#     base_url=base_url,
+# )
+
+# # 创建文档列表
+# documents = [
+#     # 使用敏感数据分类分级名称作为文档内容
+#     Document(page_content=name, metadata={"name": name, "index": i})
+#     for i, name in enumerate(names)
+# ]
+
+# # 创建向量存储（使用embedding模型）, q
+# vectorstore = FAISS.from_documents(documents, embeddings)
+
+# # 执行相似度搜索
+# relevant_docs = vectorstore.similarity_search(
+#     request_context, k=min(max_results, len(names))
+# )
 
 
 class KnowledgeBase:
     """知识库管理类"""
 
-    def __init__(self, knowledge_dir: str = "knowledge"):
+    def __init__(
+        self,
+        knowledge_dir: str = "knowledge",
+        use_embedding: bool = False,
+        embeddings=None,
+    ):
         """初始化知识库"""
         self.knowledge_dir = knowledge_dir
         self.documents = []
         self.vectorizer = None
         self.doc_vectors = None
+        self.use_embedding = use_embedding
+        self.embeddings = embeddings
+        self.vectorstore = None
         self.load_documents()
 
     def load_documents(self):
@@ -48,6 +109,7 @@ class KnowledgeBase:
             txt_files = glob.glob(os.path.join(self.knowledge_dir, "*.txt"))
             logger.info(f"找到 {len(txt_files)} 个知识文档")
 
+            documents_for_embedding = []
             for file_path in txt_files:
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -57,12 +119,23 @@ class KnowledgeBase:
                         for para in paragraphs:
                             para = para.strip()
                             if len(para) > 50:  # 只保留长度大于50的段落
-                                self.documents.append(
-                                    {
-                                        "content": para,
-                                        "source": os.path.basename(file_path),
-                                    }
-                                )
+                                doc_data = {
+                                    "content": para,
+                                    "source": os.path.basename(file_path),
+                                }
+                                self.documents.append(doc_data)
+
+                                # 如果使用embedding，创建Document对象
+                                if self.use_embedding and self.embeddings:
+                                    documents_for_embedding.append(
+                                        Document(
+                                            page_content=para,
+                                            metadata={
+                                                "source": os.path.basename(file_path),
+                                                "content": para,
+                                            },
+                                        )
+                                    )
                     logger.info(f"✅ 加载文档成功: {os.path.basename(file_path)}")
                 except Exception as e:
                     logger.error(f"❌ 加载文档失败 {file_path}: {e}")
@@ -71,7 +144,10 @@ class KnowledgeBase:
 
             # 构建向量索引
             if self.documents:
-                self.build_vector_index()
+                if self.use_embedding and self.embeddings and documents_for_embedding:
+                    self.build_embedding_vectorstore(documents_for_embedding)
+                else:
+                    self.build_vector_index()
 
         except Exception as e:
             logger.error(f"❌ 知识库加载异常: {e}")
@@ -103,8 +179,55 @@ class KnowledgeBase:
             self.vectorizer = None
             self.doc_vectors = None
 
+    def build_embedding_vectorstore(self, documents):
+        """构建基于embedding的向量存储"""
+        try:
+            logger.info("开始构建Embedding向量存储...")
+
+            # 使用FAISS创建向量存储
+            self.vectorstore = FAISS.from_documents(documents, self.embeddings)
+
+            logger.info(f"✅ Embedding向量存储构建完成，包含 {len(documents)} 个文档")
+
+        except Exception as e:
+            logger.error(f"❌ Embedding向量存储构建失败: {e}")
+            self.vectorstore = None
+            # 回退到TF-IDF
+            logger.info("回退到TF-IDF向量索引...")
+            self.build_vector_index()
+
     def search_similar_documents(self, query: str, top_k: int = 3) -> list:
         """搜索相似文档"""
+        # 优先使用embedding向量存储
+        if self.use_embedding and self.vectorstore:
+            try:
+                logger.info("使用Embedding向量存储进行搜索...")
+
+                # 执行相似度搜索
+                relevant_docs = self.vectorstore.similarity_search_with_score(
+                    query, k=top_k
+                )
+
+                results = []
+                for doc, score in relevant_docs:
+                    # 转换score为similarity（FAISS返回的是距离，需要转换为相似度）
+                    similarity = max(0, 1 - score)
+                    if similarity > 0.1:  # 相似度阈值
+                        results.append(
+                            {
+                                "content": doc.page_content,
+                                "source": doc.metadata.get("source", "unknown"),
+                                "similarity": float(similarity),
+                            }
+                        )
+
+                logger.info(f"🔍 Embedding搜索到 {len(results)} 个相似文档")
+                return results
+
+            except Exception as e:
+                logger.error(f"❌ Embedding搜索失败: {e}，回退到TF-IDF搜索")
+
+        # 回退到TF-IDF搜索
         if not self.vectorizer or self.doc_vectors is None:
             logger.warning("知识库向量化未完成，返回空结果")
             return []
@@ -132,7 +255,7 @@ class KnowledgeBase:
                     )
 
             logger.info(
-                f"🔍 搜索到 {len(results)} 个相似文档，最高相似度: {similarities[top_indices[0]]:.3f}"
+                f"🔍 TF-IDF搜索到 {len(results)} 个相似文档，最高相似度: {similarities[top_indices[0]]:.3f}"
             )
             return results
 
@@ -155,6 +278,17 @@ class LangChainLLMTester:
         self.api_key = os.getenv("LLM_API_KEY", "openai")
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 
+        # Embedding配置
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
+        self.use_embedding = os.getenv("USE_EMBEDDING", "true").lower() == "true"
+
+        self.embedding_api_url = os.getenv(
+            "EMBEDDING_API_URL", self.api_url
+        )  # 默认使用LLM API地址
+        self.embedding_api_key = os.getenv(
+            "EMBEDDING_API_KEY", self.api_key
+        )  # 默认使用LLM API密钥
+
         # 设置环境变量
         os.environ["OPENAI_API_KEY"] = self.api_key
 
@@ -163,11 +297,28 @@ class LangChainLLMTester:
             model=self.model_name, base_url=self.api_url, temperature=self.temperature
         )
 
+        # 初始化Embedding模型（如果使用）
+        self.embeddings = None
+        if self.use_embedding:
+            try:
+                self.embeddings = OpenAIEmbeddings(
+                    model=self.embedding_model,
+                    api_key=self.embedding_api_key,
+                    base_url=self.embedding_api_url,
+                )
+                logger.info(f"✅ Embedding模型初始化成功: {self.embedding_model}")
+            except Exception as e:
+                logger.warning(f"⚠️ Embedding模型初始化失败: {e}，将使用TF-IDF")
+                self.use_embedding = False
+
         # 初始化知识库
-        self.knowledge_base = KnowledgeBase()
+        self.knowledge_base = KnowledgeBase(
+            use_embedding=self.use_embedding, embeddings=self.embeddings
+        )
 
         logger.info(
-            f"初始化LangChain LLM测试器: URL={self.api_url}, Model={self.model_name}"
+            f"初始化LangChain LLM测试器: URL={self.api_url}, Model={self.model_name}, "
+            f"Embedding: {self.use_embedding} ({self.embedding_model if self.use_embedding else 'N/A'})"
         )
 
     async def test_connection(self, timeout: int = 10) -> Dict[str, Any]:
@@ -289,64 +440,32 @@ class LangChainLLMTester:
             "knowledge_used": bool(knowledge_context),
         }
 
-    async def test_streaming_response(
-        self, prompt: str = "请详细介绍一下人工智能的发展历史。"
-    ) -> Dict[str, Any]:
-        """测试流式响应功能"""
-        logger.info(f"开始测试流式响应，提示词: {prompt[:50]}...")
-
-        try:
-            start_time = time.time()
-
-            # 使用标准OpenAI接口的流式响应
-            messages = [HumanMessage(content=prompt)]
-            response_chunks = []
-
-            async for chunk in self.llm.astream(messages):
-                if hasattr(chunk, "content") and chunk.content:
-                    response_chunks.append(chunk.content)
-
-            response_time = time.time() - start_time
-            full_content = "".join(response_chunks)
-
-            logger.info(f"✅ 流式响应成功! 响应时间: {response_time:.2f}s")
-            logger.info(f"回复内容: {full_content[:100]}...")
-
-            return {
-                "success": True,
-                "response_time": response_time,
-                "content": full_content,
-                "streaming": True,
-            }
-
-        except Exception as e:
-            logger.error(f"❌ 流式响应异常: {e}")
-            return {
-                "success": False,
-                "message": f"流式响应异常: {str(e)}",
-                "error_type": "streaming_error",
-            }
-
 
 async def main():
     """主函数"""
     print("🚀 LangChain LLM API测试工具")
     print("=" * 50)
+    test_result_logger.info("LangChain LLM API测试工具 - 测试开始")
 
     # 创建测试器
     tester = LangChainLLMTester()
 
     # 测试连接
     print("\n📡 测试API连接...")
+    test_result_logger.info("开始测试API连接")
     connection_result = await tester.test_connection()
 
     if not connection_result["success"]:
         print(f"❌ 连接测试失败: {connection_result['message']}")
+        test_result_logger.error(f"API连接测试失败: {connection_result['message']}")
         if "response_text" in connection_result:
             print(f"响应内容: {connection_result['response_text']}")
         return
 
     print(f"✅ 连接测试成功! 响应时间: {connection_result['response_time']:.2f}s")
+    test_result_logger.info(
+        f"API连接测试成功, 响应时间: {connection_result['response_time']:.2f}s"
+    )
 
     # 测试LLM响应（不使用知识库）
     print("\n🤖 测试LLM响应（不使用知识库）...")
@@ -359,8 +478,12 @@ async def main():
         print(f"✅ LLM响应测试成功!")
         print(f"响应时间: {llm_result['response_time']:.2f}s")
         print(f"回复内容: {llm_result['content'][:200]}...")
+        test_result_logger.info(
+            f"LLM响应测试成功, 响应时间: {llm_result['response_time']:.2f}s"
+        )
     else:
         print(f"❌ LLM响应测试失败: {llm_result['message']}")
+        test_result_logger.error(f"LLM响应测试失败: {llm_result['message']}")
 
     # 测试LLM响应（使用知识库）
     print("\n🤖 测试LLM响应（使用知识库）...")
@@ -375,22 +498,23 @@ async def main():
         print(f"使用了知识库: {'是' if knowledge_result['knowledge_used'] else '否'}")
         if knowledge_result["knowledge_used"]:
             print(f"知识来源: {', '.join(knowledge_result['knowledge_sources'])}")
+            print(
+                f"检索方法: {'Embedding' if tester.knowledge_base.use_embedding else 'TF-IDF'}"
+            )
         print(f"回复内容: {knowledge_result['content'][:300]}...")
+
+        # 记录到测试日志
+        test_result_logger.info(
+            f"知识增强LLM响应测试成功, "
+            f"响应时间: {knowledge_result['response_time']:.2f}s, "
+            f"使用知识库: {'是' if knowledge_result['knowledge_used'] else '否'}, "
+            f"检索方法: {'Embedding' if tester.knowledge_base.use_embedding else 'TF-IDF'}"
+        )
     else:
         print(f"❌ 知识增强LLM响应测试失败: {knowledge_result['message']}")
-
-    # 测试流式响应
-    print("\n🌊 测试流式响应...")
-    streaming_result = await tester.test_streaming_response(
-        "请详细介绍一下数据安全分析的重要性。"
-    )
-
-    if streaming_result["success"]:
-        print(f"✅ 流式响应测试成功!")
-        print(f"响应时间: {streaming_result['response_time']:.2f}s")
-        print(f"回复内容: {streaming_result['content'][:200]}...")
-    else:
-        print(f"❌ 流式响应测试失败: {streaming_result['message']}")
+        test_result_logger.error(
+            f"知识增强LLM响应测试失败: {knowledge_result['message']}"
+        )
 
     # 知识库搜索测试
     print("\n📚 测试知识库搜索功能...")
@@ -403,6 +527,9 @@ async def main():
             result = results[0]
             print(f"  📄 最相似文档 (相似度: {result['similarity']:.3f}):")
             print(f"  💾 来源: {result['source']}")
+            print(
+                f"  🔍 检索方法: {'Embedding' if tester.knowledge_base.use_embedding else 'TF-IDF'}"
+            )
             print(f"  📝 内容预览: {result['content'][:100]}...")
         else:
             print("  ❌ 未找到相关文档")
