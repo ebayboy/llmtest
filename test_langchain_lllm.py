@@ -26,24 +26,24 @@ class LangChainLLMTester:
     """LangChain LLM API测试器"""
     
     def __init__(self):
-        """初始化测试器"""
-        # 从环境变量获取配置，如果没有则使用默认值
-        self.api_url = os.getenv("LLM_API_URL", "http://116.198.229.83:9998/v1")
-        self.model_name = os.getenv("LLM_MODEL", "baidu/ERNIE-4.5-21B-A3B-PT")
-        self.api_key = os.getenv("LLM_API_KEY", "openai")
-        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+    """初始化测试器"""
+    # 从环境变量获取配置，如果没有则使用默认值
+    self.api_url = os.getenv("LLM_API_URL", "http://116.198.229.83:9998/v1")
+    self.model_name = os.getenv("LLM_MODEL", "baidu/ERNIE-4.5-21B-A3B-PT")
+    self.api_key = os.getenv("LLM_API_KEY", "openai")
+    self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+    
+    # 设置环境变量
+    os.environ["OPENAI_API_KEY"] = self.api_key
+    
+    # 初始化LangChain LLM客户端
+    self.llm = ChatOpenAI(
+        model=self.model_name,
+        base_url=self.api_url,
+        temperature=self.temperature
+    )
         
-        # 设置环境变量
-        os.environ["OPENAI_API_KEY"] = self.api_key
-        
-        # 初始化LangChain LLM客户端
-        self.llm = ChatOpenAI(
-            model=self.model_name,
-            base_url=self.api_url,
-            temperature=self.temperature
-        )
-            
-        logger.info(f"初始化LangChain LLM测试器: URL={self.api_url}, Model={self.model_name}")
+    logger.info(f"初始化LangChain LLM测试器: URL={self.api_url}, Model={self.model_name}")
     
     async def test_connection(self, timeout: int = 10) -> Dict[str, Any]:
         """测试API连接"""
