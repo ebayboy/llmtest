@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  weaviate:
+    image: semitechnologies/weaviate:1.28.2
+    pull_policy: if_not_present # 避免每次都拉取最新镜像，保持版本稳定
+    container_name: weaviate
+    ports:
+      - "8081:8080" # REST API
+      - "50051:50051" # gRPC（高性能客户端使用）
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    restart: unless-stopped
+    environment:
+      # 基本配置
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true" # 开发环境开启匿名访问
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      # 禁用遥测
+      DISABLE_TELEMETRY: "true"
+      # 单节点配置 - 禁用集群模式
+      CLUSTER_HOSTNAME: "weaviate"
+      RAFT_ENABLED: "false"
+      # 简化配置
+      DISK_USE_READONLY_PERCENTAGE: "90"
+      DISK_USE_WARNING_PERCENTAGE: "80"
+
+volumes:
+  weaviate_data:
