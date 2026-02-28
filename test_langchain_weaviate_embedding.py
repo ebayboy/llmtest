@@ -24,7 +24,10 @@ from langchain_core.documents import Document
 from langchain_weaviate import WeaviateVectorStore
 import weaviate
 from weaviate.classes.init import Auth
-from weaviate.classes.config import Configure
+from weaviate.classes.config import Configure, Property
+from langchain_openai import OpenAIEmbeddings
+from langchain_core.documents import Document
+from langchain_weaviate import WeaviateVectorStore
 
 # 导入知识库相关模块
 import numpy as np
@@ -55,15 +58,25 @@ class WeaviateKnowledgeBase:
     def __init__(
         self,
         knowledge_dir: str = "knowledge",
-        weaviate_url: str = "http://localhost:8080",
+        weaviate_url: str = None,
         embedding_model=None,
-        collection_name: str = "KnowledgeBase",
+        collection_name: str = None,
     ):
         """初始化Weaviate知识库"""
         self.knowledge_dir = knowledge_dir
-        self.weaviate_url = weaviate_url
+
+        # 从环境变量获取Weaviate配置，如果没有提供参数
+        self.weaviate_url = (
+            weaviate_url
+            if weaviate_url is not None
+            else os.getenv("WEAVIATE_URL", "http://localhost:8081")
+        )
         self.embedding_model = embedding_model
-        self.collection_name = collection_name
+        self.collection_name = (
+            collection_name
+            if collection_name is not None
+            else os.getenv("WEAVIATE_COLLECTION", "KnowledgeBase")
+        )
         self.documents = []
         self.vectorizer = None
         self.doc_vectors = None
@@ -83,9 +96,18 @@ class WeaviateKnowledgeBase:
             logger.info(f"正在连接Weaviate服务器: {self.weaviate_url}")
 
             # 创建Weaviate客户端
+            # 从 URL 中提取端口，默认为 8081
+            weaviate_port = 8081
+            if self.weaviate_url and ":" in self.weaviate_url:
+                try:
+                    # 从 URL 如 http://localhost:8081 中提取端口
+                    weaviate_port = int(self.weaviate_url.split(":")[-1])
+                except (ValueError, IndexError):
+                    weaviate_port = 8081
+
             self.weaviate_client = weaviate.connect_to_local(
                 host="localhost",
-                port=8080,
+                port=weaviate_port,
                 grpc_port=50051,
             )
 
@@ -103,42 +125,43 @@ class WeaviateKnowledgeBase:
             logger.error(f"❌ Weaviate初始化失败: {e}")
             self.weaviate_client = None
 
-    def setup_collection(self):
-        """设置Weaviate collection"""
+    def setup_collection(self) -> bool:
+        """设置Weaviate集合"""
         try:
-            # 检查collection是否存在
-            if self.weaviate_client.collections.exists(self.collection_name):
-                logger.info(f"Collection '{self.collection_name}' 已存在")
-                self.collection = self.weaviate_client.collections.get(
-                    self.collection_name
-                )
-            else:
-                logger.info(f"创建Collection '{self.collection_name}'...")
+            # 检查客户端是否已初始化
+            if not self.weaviate_client:
+                logger.error("Weaviate客户端未初始化")
+                return False
 
-                # 创建新的collection
-                self.collection = self.weaviate_client.collections.create(
-                    name=self.collection_name,
-                    vectorizer_config=Configure.Vectorizer.none(),  # 使用外部向量
-                    properties=[
-                        Configure.Property(
-                            name="content",
-                            data_type=weaviate.classes.config.DataType.TEXT,
-                        ),
-                        Configure.Property(
-                            name="source",
-                            data_type=weaviate.classes.config.DataType.TEXT,
-                        ),
-                        Configure.Property(
-                            name="timestamp",
-                            data_type=weaviate.classes.config.DataType.DATE,
-                        ),
-                    ],
-                )
-                logger.info(f"✅ Collection '{self.collection_name}' 创建成功")
+            # 检查集合是否存在
+            if self.weaviate_client.collections.exists(self.collection_name):
+                logger.info(f"集合 '{self.collection_name}' 已存在")
+                return True
+
+            # 创建新集合
+            logger.info(f"创建集合 '{self.collection_name}'...")
+            self.weaviate_client.collections.create(
+                name=self.collection_name,
+                vectorizer_config=Configure.Vectorizer.none(),  # 使用外部向量
+                properties=[
+                    Property(
+                        name="content", data_type=weaviate.classes.config.DataType.TEXT
+                    ),
+                    Property(
+                        name="source", data_type=weaviate.classes.config.DataType.TEXT
+                    ),
+                    Property(
+                        name="timestamp",
+                        data_type=weaviate.classes.config.DataType.DATE,
+                    ),
+                ],
+            )
+            logger.info(f"✅ 集合 '{self.collection_name}' 创建成功")
+            return True
 
         except Exception as e:
-            logger.error(f"❌ Collection设置失败: {e}")
-            self.collection = None
+            logger.error(f"❌ 集合创建失败: {e}")
+            return False
 
     def load_documents(self):
         """加载知识文档"""
@@ -221,6 +244,15 @@ class WeaviateKnowledgeBase:
         """构建Weaviate向量存储"""
         try:
             logger.info("开始构建Weaviate向量存储...")
+
+            # 检查Weaviate客户端和collection是否可用
+            if not self.weaviate_client:
+                logger.error("Weaviate客户端未初始化")
+                raise Exception("Weaviate客户端未初始化")
+
+            if not self.collection:
+                logger.error("Weaviate collection未初始化")
+                raise Exception("Weaviate collection未初始化")
 
             # 创建Weaviate向量存储
             self.vectorstore = WeaviateVectorStore(
