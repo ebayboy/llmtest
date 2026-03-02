@@ -72,17 +72,18 @@ class WeaviateKnowledgeBase:
             else os.getenv("WEAVIATE_URL", "http://localhost:8081")
         )
         self.embedding_model = embedding_model
-        self.collection_name = (
+        self.collection_embedding_name = (
             collection_name
             if collection_name is not None
             else os.getenv("WEAVIATE_COLLECTION", "KnowledgeBase")
         )
         self.documents = []
-        self.vectorizer = None
-        self.doc_vectors = None
+        self.collection_tfidf = None
+        self.doc_vectors_tfidf = None
         self.weaviate_client = None
+
         self.vectorstore = None
-        self.collection = None
+        self.collection_embedding = None
 
         # 初始化Weaviate客户端
         self.init_weaviate_client()
@@ -134,14 +135,14 @@ class WeaviateKnowledgeBase:
                 return False
 
             # 检查集合是否存在
-            if self.weaviate_client.collections.exists(self.collection_name):
-                logger.info(f"集合 '{self.collection_name}' 已存在")
+            if self.weaviate_client.collections.exists(self.collection_embedding_name):
+                logger.info(f"集合 '{self.collection_embedding_name}' 已存在")
                 return True
 
             # 创建新集合
-            logger.info(f"创建集合 '{self.collection_name}'...")
+            logger.info(f"创建集合 '{self.collection_embedding_name}'...")
             self.weaviate_client.collections.create(
-                name=self.collection_name,
+                name=self.collection_embedding_name,
                 vectorizer_config=Configure.Vectorizer.none(),  # 使用外部向量
                 properties=[
                     Property(
@@ -156,7 +157,7 @@ class WeaviateKnowledgeBase:
                     ),
                 ],
             )
-            logger.info(f"✅ 集合 '{self.collection_name}' 创建成功")
+            logger.info(f"✅ 集合 '{self.collection_embedding_name}' 创建成功")
             return True
 
         except Exception as e:
@@ -207,7 +208,11 @@ class WeaviateKnowledgeBase:
 
             # 构建向量索引
             if self.documents:
-                if self.weaviate_client and self.collection and self.embedding_model:
+                if (
+                    self.weaviate_client
+                    and self.collection_embedding
+                    and self.embedding_model
+                ):
                     self.build_weaviate_vectorstore(documents_for_embedding)
                 else:
                     # 回退到TF-IDF
@@ -222,7 +227,7 @@ class WeaviateKnowledgeBase:
         try:
             logger.info("开始构建TF-IDF向量索引...")
 
-            self.vectorizer = TfidfVectorizer(
+            self.collection_tfidf = TfidfVectorizer(
                 max_features=10000,
                 stop_words=None,
                 ngram_range=(1, 2),
@@ -231,14 +236,16 @@ class WeaviateKnowledgeBase:
             )
 
             doc_contents = [doc["content"] for doc in self.documents]
-            self.doc_vectors = self.vectorizer.fit_transform(doc_contents)
+            self.doc_vectors_tfidf = self.collection_tfidf.fit_transform(doc_contents)
 
-            logger.info(f"✅ TF-IDF向量索引构建完成，维度: {self.doc_vectors.shape}")
+            logger.info(
+                f"✅ TF-IDF向量索引构建完成，维度: {self.doc_vectors_tfidf.shape}"
+            )
 
         except Exception as e:
             logger.error(f"❌ TF-IDF向量索引构建失败: {e}")
-            self.vectorizer = None
-            self.doc_vectors = None
+            self.collection_tfidf = None
+            self.doc_vectors_tfidf = None
 
     def build_weaviate_vectorstore(self, documents: List[Document]):
         """构建Weaviate向量存储"""
@@ -250,20 +257,20 @@ class WeaviateKnowledgeBase:
                 logger.error("Weaviate客户端未初始化")
                 raise Exception("Weaviate客户端未初始化")
 
-            if not self.collection:
+            if not self.collection_embedding:
                 logger.error("Weaviate collection未初始化")
                 raise Exception("Weaviate collection未初始化")
 
             # 创建Weaviate向量存储
             self.vectorstore = WeaviateVectorStore(
                 client=self.weaviate_client,
-                index_name=self.collection_name,
+                index_name=self.collection_embedding_name,
                 text_key="content",
                 embedding=self.embedding_model,
             )
 
             # 检查是否已有数据
-            existing_count = self.collection.aggregate.over_all(
+            existing_count = self.collection_embedding.aggregate.over_all(
                 total_count=True
             ).total_count
             if existing_count > 0:
@@ -319,16 +326,16 @@ class WeaviateKnowledgeBase:
 
     def search_with_tfidf(self, query: str, top_k: int = 3) -> list:
         """使用TF-IDF搜索相似文档"""
-        if not self.vectorizer or self.doc_vectors is None:
+        if not self.collection_tfidf or self.doc_vectors_tfidf is None:
             logger.warning("知识库向量化未完成，返回空结果")
             return []
 
         try:
             # 将查询向量化
-            query_vector = self.vectorizer.transform([query])
+            query_vector = self.collection_tfidf.transform([query])
 
             # 计算相似度
-            similarities = cosine_similarity(query_vector, self.doc_vectors)[0]
+            similarities = cosine_similarity(query_vector, self.doc_vectors_tfidf)[0]
 
             # 获取最相似的文档索引
             top_indices = np.argsort(similarities)[-top_k:][::-1]
@@ -377,7 +384,9 @@ class WeaviateLLMTester:
 
         # Weaviate配置
         self.weaviate_url = os.getenv("WEAVIATE_URL", "http://localhost:8080")
-        self.collection_name = os.getenv("WEAVIATE_COLLECTION", "KnowledgeBase")
+        self.collection_embedding_name = os.getenv(
+            "WEAVIATE_COLLECTION", "KnowledgeBase"
+        )
 
         # Embedding配置
         self.embedding_model_name = os.getenv(
@@ -415,12 +424,12 @@ class WeaviateLLMTester:
         self.knowledge_base = WeaviateKnowledgeBase(
             weaviate_url=self.weaviate_url,
             embedding_model=self.embeddings,
-            collection_name=self.collection_name,
+            collection_name=self.collection_embedding_name,
         )
 
         logger.info(
             f"初始化Weaviate LLM测试器: URL={self.api_url}, Model={self.model_name}, "
-            f"Weaviate: {self.weaviate_url}, Collection: {self.collection_name}, "
+            f"Weaviate: {self.weaviate_url}, Collection: {self.collection_embedding_name}, "
             f"Embedding: {self.use_embedding} ({self.embedding_model_name if self.use_embedding else 'N/A'})"
         )
 
